@@ -82,7 +82,7 @@ window.dataLayer.push({
 }
 ```
 
-При повторном запуске Event Collector событие отправляется еще раз с тем же `page_load_id`.
+При повторном запуске Event Collector (в норме такого не должно происходить) событие отправляется еще раз с тем же `page_load_id`.
 
 #### 3.2. `posthog_script_load_requested`
 
