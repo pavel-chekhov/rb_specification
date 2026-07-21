@@ -37,8 +37,8 @@
 
 Измеритель реализуется одним тегом **Custom HTML** и запускается по триггеру **Initialization — All Pages**. Вспомогательные операции вынесены в две переменные типа **Custom JavaScript**:
 
-- `{{Page Load ID}}` один раз генерирует ID текущего HTML-документа, сохраняет его в `window.PAGE_LOAD_ID` и возвращает сохранённое значение при повторных обращениях;
-- `{{PWA Context}}` определяет текущий режим запуска и возвращает объект с полями `isPwa` и `displayMode`.
+- `{{page_load_id}}` один раз генерирует ID текущего HTML-документа, сохраняет его в `window.PAGE_LOAD_ID` и возвращает сохранённое значение при повторных обращениях;
+- `{{pwa_context}}` определяет текущий режим запуска и возвращает объект с полями `isPwa` и `displayMode`.
 
 Обе переменные вызываются из основного Custom HTML-тега. Отдельные триггеры для них не создаются.
 
@@ -213,7 +213,7 @@ window.dataLayer.push({
 
 Режим `window-controls-overlay` учитывается для поддерживающих его desktop PWA. Подробности: [Window Controls Overlay](https://learn.microsoft.com/en-gb/microsoft-edge/progressive-web-apps/how-to/window-controls-overlay). Режим `fullscreen` считается app-like, но может быть активирован и для страницы без установленной PWA. Поэтому для точной интерпретации вместе с `is_pwa` всегда передаётся исходный `display_mode`.
 
-Порядок определения: сначала `navigator.standalone === true`, затем media queries для известных display modes, после них `navigator.standalone === false` как подтверждение обычного browser-режима. Если ни один сигнал недоступен или не дал результата, передаются `display_mode: "unknown"` и `is_pwa: null`. Основной тег обращается к `{{PWA Context}}` один раз при создании `monitor`, поэтому результат остаётся одинаковым для всех стадий текущего `page_load_id`.
+Порядок определения: сначала `navigator.standalone === true`, затем media queries для известных display modes, после них `navigator.standalone === false` как подтверждение обычного browser-режима. Если ни один сигнал недоступен или не дал результата, передаются `display_mode: "unknown"` и `is_pwa: null`. Основной тег обращается к `{{pwa_context}}` один раз при создании `monitor`, поэтому результат остаётся одинаковым для всех стадий текущего `page_load_id`.
 
 ### 6.3. Контракт восстановления из bfcache
 
@@ -286,9 +286,9 @@ performance.timing
 
 Код намеренно не использует стрелочные функции, `const`, `let`, optional chaining и `URLSearchParams`, чтобы сохранить совместимость со старыми браузерами и WebView.
 
-### 8.1. Custom JavaScript Variable `Page Load ID`
+### 8.1. Custom JavaScript Variable `page_load_id`
 
-Создать в GTM переменную типа **Custom JavaScript** с именем `Page Load ID`. Переменная сохраняет первое сгенерированное значение в `window.PAGE_LOAD_ID`, поэтому повторное обращение на том же документе не создаёт новый ID.
+Создать в GTM переменную типа **Custom JavaScript** с именем `page_load_id`. Переменная сохраняет первое сгенерированное значение в `window.PAGE_LOAD_ID`, поэтому повторное обращение на том же документе не создаёт новый ID.
 
 ```javascript
 function () {
@@ -338,9 +338,9 @@ function () {
 }
 ```
 
-### 8.2. Custom JavaScript Variable `PWA Context`
+### 8.2. Custom JavaScript Variable `pwa_context`
 
-Создать в GTM переменную типа **Custom JavaScript** с именем `PWA Context`. Она возвращает контекст текущего режима запуска; основной тег сохраняет этот объект в `monitor` при инициализации.
+Создать в GTM переменную типа **Custom JavaScript** с именем `pwa_context`. Она возвращает контекст текущего режима запуска; основной тег сохраняет этот объект в `monitor` при инициализации.
 
 ```javascript
 function () {
@@ -412,8 +412,8 @@ function () {
 
   var monitor = {
     schemaVersion: 3,
-    pageLoadId: {{Page Load ID}},
-    pwaContext: {{PWA Context}},
+    pageLoadId: {{page_load_id}},
+    pwaContext: {{pwa_context}},
     domReadyReached: false,
     loadReached: false,
     completeSent: false,
@@ -805,10 +805,10 @@ function () {
 9. При `pageshow` с `persisted === true` публикуется отдельное событие `page_bfcache_restore` без загрузочных метрик. Новый `started` и новый `page_load_id` не создаются.
 10. Каждое повторное восстановление того же документа увеличивает `restore_index` на единицу.
 11. Потеря фокуса через `focus` или `blur` не создаёт snapshot.
-12. `{{Page Load ID}}` сохраняет созданный ID в `window.PAGE_LOAD_ID`; повторные обращения на том же документе возвращают то же значение.
+12. `{{page_load_id}}` сохраняет созданный ID в `window.PAGE_LOAD_ID`; повторные обращения на том же документе возвращают то же значение.
 13. Повторный запуск Custom HTML не создаёт новый `page_load_id`, новые listeners или повторные события.
 14. Каждый push `page_load_performance` содержит полную схему версии `3`; недоступные значения равны `null`.
-15. `{{PWA Context}}` возвращает объект с полями `isPwa` и `displayMode`, который основной тег сохраняет при создании `monitor`.
+15. `{{pwa_context}}` возвращает объект с полями `isPwa` и `displayMode`, который основной тег сохраняет при создании `monitor`.
 16. PWA-контекст не меняется между `started`, `snapshot` и `complete` одного `page_load_id`.
 17. Режимы `ios_standalone`, `window-controls-overlay`, `standalone`, `minimal-ui` и `fullscreen` дают `is_pwa: true`; `browser` даёт `false`; `unknown` даёт `null`.
 18. `utm_source` и `utm_medium` читаются из одноимённых query-параметров; отсутствующее значение передаётся как `null`.
@@ -834,7 +834,7 @@ function () {
 | Назад/вперёд без bfcache | `pageshow` с `persisted: false` не создаёт restore-событие. |
 | Назад/вперёд через bfcache | Создаётся `page_bfcache_restore` с прежним `page_load_id`, `restore_index: 1` и без `metrics`. |
 | Повторное восстановление через bfcache | Создаётся следующее `page_bfcache_restore` с тем же ID и увеличенным `restore_index`. |
-| Повторное обращение к `{{Page Load ID}}` | Возвращается существующее значение `window.PAGE_LOAD_ID`; новый ID не генерируется. |
+| Повторное обращение к `{{page_load_id}}` | Возвращается существующее значение `window.PAGE_LOAD_ID`; новый ID не генерируется. |
 | `navigator.standalone === true` на iOS | `display_mode` равен `ios_standalone`, `is_pwa` равен `true`. |
 | App-like display mode | Для `window-controls-overlay`, `standalone`, `minimal-ui` и `fullscreen` сохраняется совпадающий `display_mode`, `is_pwa` равен `true`. |
 | Обычная вкладка браузера | `display_mode` равен `browser`, `is_pwa` равен `false`. |
