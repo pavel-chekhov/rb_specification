@@ -786,13 +786,284 @@ function () {
 
 События `page_bfcache_restore` анализируются отдельно. Они связываются с первоначальной загрузкой через `page_load_id`, но не увеличивают количество загрузок и не участвуют в расчёте перцентилей `ttfb_ms`, `dom_ready_ms` или `full_load_ms`.
 
-## 10. Сэмплирование
+## 10. Перцентили и отчёты в GA4 BigQuery
+
+### 10.1. Интерпретация перцентилей
+
+Перцентиль — это порог времени, ниже которого находится заданная доля наблюдений. Он измеряется в тех же единицах, что и исходная метрика, то есть для этого ТЗ — в миллисекундах, а не в процентах.
+
+| Перцентиль | Интерпретация |
+| --- | --- |
+| P50 | Медиана: 50% загрузок завершились не медленнее этого значения. |
+| P75 | 75% загрузок завершились не медленнее этого значения, а 25% были медленнее. |
+| P95 | 95% загрузок завершились не медленнее этого значения; оставшиеся 5% образуют наиболее медленный хвост. |
+
+Например, `P75 full_load_ms = 3200` означает, что 75% полных загрузок завершились не более чем за 3,2 секунды. Перцентили предпочтительнее среднего значения для мониторинга производительности, потому что несколько аномально медленных загрузок могут заметно сместить среднее.
+
+### 10.2. Регистрация параметров в GA4
+
+GA4 Event-тег передаёт значения как event parameters. Чтобы использовать числовые значения в отчётах и Explorations GA4, зарегистрировать `redirect_time_ms`, `ttfb_ms`, `dom_ready_ms` и `full_load_ms` как **custom metrics** с единицей измерения **Milliseconds**. Категориальные параметры, используемые в фильтрах и разбивках, например `measurement_stage`, `stage_source`, `timing_api`, `navigation_type`, `is_pwa` и `display_mode`, регистрируются как **event-scoped custom dimensions**.
+
+`page_load_id` нужно передавать в GA4, но не регистрировать как custom dimension: уникальные ID создают высокую кардинальность и могут привести к строке `(other)` в интерфейсе GA4. В BigQuery этот параметр остаётся доступен внутри `event_params` и используется для объединения стадий одной загрузки.
+
+Подробности: [custom metrics](https://support.google.com/analytics/answer/14239619), [event-scoped custom dimensions](https://support.google.com/analytics/answer/14239696), [GA4 BigQuery Export schema](https://support.google.com/analytics/answer/7029846).
+
+### 10.3. Набор отчётов
+
+| График | Метрика | Разбивка | Условия |
+| --- | --- | --- | --- |
+| TTFB по регионам | Медиана `ttfb_ms` | `geo.city` | Все дедуплицированные загрузки с доступным TTFB. |
+| Full load по устройствам | P50/P75/P95 `full_load_ms` | `device.category` + `device.operating_system` | Только итоговая стадия `complete`. |
+| Редиректы | Медиана `redirect_time_ms` | `geo.country` | Только загрузки с доступным временем редиректа. |
+| Тренд по времени | P75 `full_load_ms` | По дням | Только итоговая стадия `complete`. |
+| PWA vs Web | P75 `full_load_ms` | `is_pwa` | Только `complete`; неизвестный режим исключается. |
+
+Поля `geo.city`, `geo.country`, `device.category` и `device.operating_system` входят в стандартную схему экспорта GA4 и не извлекаются из `event_params`.
+
+### 10.4. Подготовка данных
+
+Примеры предполагают, что GA4 Event-тег преобразует листовые значения объекта `performance_monitoring` в плоские event parameters с именами `page_load_id`, `measurement_stage`, `redirect_time_ms`, `ttfb_ms`, `dom_ready_ms`, `full_load_ms` и `is_pwa`.
+
+Заменить `` `project.dataset.events_*` `` на wildcard-таблицу своего GA4-датасета. Скрипт создаёт временную таблицу `page_loads`, доступную следующим запросам в рамках одной BigQuery-сессии. По умолчанию обрабатываются последние 30 дней, включая текущий день.
+
+```sql
+DECLARE date_from DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 29 DAY);
+DECLARE date_to DATE DEFAULT CURRENT_DATE();
+
+CREATE TEMP TABLE page_loads AS
+WITH extracted AS (
+  SELECT
+    event_timestamp,
+    PARSE_DATE('%Y%m%d', event_date) AS event_date,
+    geo.city AS geo_city,
+    geo.country AS geo_country,
+    device.category AS device_type,
+    device.operating_system AS os,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_load_id'
+      LIMIT 1
+    ) AS page_load_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'measurement_stage'
+      LIMIT 1
+    ) AS measurement_stage,
+
+    (
+      SELECT COALESCE(
+        CAST(value.int_value AS FLOAT64),
+        value.double_value,
+        CAST(value.float_value AS FLOAT64)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'redirect_time_ms'
+      LIMIT 1
+    ) AS redirect_time_ms,
+
+    (
+      SELECT COALESCE(
+        CAST(value.int_value AS FLOAT64),
+        value.double_value,
+        CAST(value.float_value AS FLOAT64)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'ttfb_ms'
+      LIMIT 1
+    ) AS ttfb_ms,
+
+    (
+      SELECT COALESCE(
+        CAST(value.int_value AS FLOAT64),
+        value.double_value,
+        CAST(value.float_value AS FLOAT64)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'dom_ready_ms'
+      LIMIT 1
+    ) AS dom_ready_ms,
+
+    (
+      SELECT COALESCE(
+        CAST(value.int_value AS FLOAT64),
+        value.double_value,
+        CAST(value.float_value AS FLOAT64)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'full_load_ms'
+      LIMIT 1
+    ) AS full_load_ms,
+
+    (
+      SELECT COALESCE(
+        value.string_value,
+        CAST(value.int_value AS STRING),
+        CAST(value.double_value AS STRING),
+        CAST(value.float_value AS STRING)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'is_pwa'
+      LIMIT 1
+    ) AS is_pwa_raw
+  FROM `project.dataset.events_*`
+  WHERE
+    _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', date_from)
+      AND FORMAT_DATE('%Y%m%d', date_to)
+    AND event_name = 'page_load_performance'
+),
+normalized AS (
+  SELECT
+    * EXCEPT (is_pwa_raw),
+    CASE
+      WHEN LOWER(is_pwa_raw) IN ('true', '1', '1.0') THEN TRUE
+      WHEN LOWER(is_pwa_raw) IN ('false', '0', '0.0') THEN FALSE
+      ELSE NULL
+    END AS is_pwa
+  FROM extracted
+  WHERE page_load_id IS NOT NULL
+),
+ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY page_load_id
+      ORDER BY
+        CASE measurement_stage
+          WHEN 'complete' THEN 3
+          WHEN 'snapshot' THEN 2
+          WHEN 'started' THEN 1
+          ELSE 0
+        END DESC,
+        event_timestamp DESC
+    ) AS stage_rank
+  FROM normalized
+)
+SELECT * EXCEPT (stage_rank)
+FROM ranked
+WHERE stage_rank = 1;
+```
+
+При последовательности `started → snapshot → complete` в `page_loads` останется только `complete`. Если `complete` отсутствует, будет выбрана стадия `snapshot`, а при её отсутствии — `started`. Поэтому TTFB и время редиректа не получают дополнительный вес из-за нескольких событий одного `page_load_id`.
+
+### 10.5. Медиана TTFB по городам
+
+```sql
+SELECT
+  COALESCE(NULLIF(geo_city, ''), '(unknown)') AS geo_city,
+  COUNT(*) AS page_loads,
+  APPROX_QUANTILES(ttfb_ms, 100 IGNORE NULLS)[OFFSET(50)]
+    AS median_ttfb_ms
+FROM page_loads
+WHERE ttfb_ms IS NOT NULL
+GROUP BY 1
+ORDER BY median_ttfb_ms DESC;
+```
+
+### 10.6. P50/P75/P95 Full Load по устройствам
+
+`full_load_ms` существует только у стадии `complete`, поэтому незавершённые загрузки не участвуют в этом отчёте.
+
+```sql
+SELECT
+  COALESCE(NULLIF(device_type, ''), '(unknown)') AS device_type,
+  COALESCE(NULLIF(os, ''), '(unknown)') AS os,
+  COUNT(*) AS completed_loads,
+  APPROX_QUANTILES(full_load_ms, 100 IGNORE NULLS)[OFFSET(50)]
+    AS p50_full_load_ms,
+  APPROX_QUANTILES(full_load_ms, 100 IGNORE NULLS)[OFFSET(75)]
+    AS p75_full_load_ms,
+  APPROX_QUANTILES(full_load_ms, 100 IGNORE NULLS)[OFFSET(95)]
+    AS p95_full_load_ms
+FROM page_loads
+WHERE
+  measurement_stage = 'complete'
+  AND full_load_ms IS NOT NULL
+GROUP BY 1, 2
+ORDER BY p75_full_load_ms DESC;
+```
+
+### 10.7. Медиана времени редиректа по странам
+
+В расчёт входят только загрузки с непустым `redirect_time_ms`. Загрузки без редиректа и загрузки, для которых браузер скрыл cross-origin redirect timing, не интерпретируются как нулевые значения.
+
+```sql
+SELECT
+  COALESCE(NULLIF(geo_country, ''), '(unknown)') AS geo_country,
+  COUNT(*) AS redirected_loads,
+  APPROX_QUANTILES(redirect_time_ms, 100 IGNORE NULLS)[OFFSET(50)]
+    AS median_redirect_time_ms
+FROM page_loads
+WHERE redirect_time_ms IS NOT NULL
+GROUP BY 1
+ORDER BY median_redirect_time_ms DESC;
+```
+
+### 10.8. Дневной тренд P75 Full Load
+
+```sql
+SELECT
+  event_date,
+  COUNT(*) AS completed_loads,
+  APPROX_QUANTILES(full_load_ms, 100 IGNORE NULLS)[OFFSET(75)]
+    AS p75_full_load_ms
+FROM page_loads
+WHERE
+  measurement_stage = 'complete'
+  AND full_load_ms IS NOT NULL
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+### 10.9. P75 Full Load для PWA и Web
+
+`is_pwa: null` означает, что режим запуска определить не удалось. Такие строки исключаются, чтобы они не попадали в группу Web.
+
+```sql
+SELECT
+  IF(is_pwa, 'PWA', 'Web') AS launch_mode,
+  COUNT(*) AS completed_loads,
+  APPROX_QUANTILES(full_load_ms, 100 IGNORE NULLS)[OFFSET(75)]
+    AS p75_full_load_ms
+FROM page_loads
+WHERE
+  measurement_stage = 'complete'
+  AND full_load_ms IS NOT NULL
+  AND is_pwa IS NOT NULL
+GROUP BY launch_mode
+ORDER BY launch_mode;
+```
+
+### 10.10. Точный расчёт
+
+`APPROX_QUANTILES` возвращает приближённые границы и рассчитан на большие объёмы данных. Для точного перцентиля можно использовать `PERCENTILE_CONT`, который выполняется как оконная функция и обычно требует больше ресурсов. Подробности: [approximate aggregate functions](https://cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions), [PERCENTILE_CONT](https://cloud.google.com/bigquery/docs/reference/standard-sql/navigation_functions#percentile_cont).
+
+Пример точного P75 Full Load по устройствам:
+
+```sql
+SELECT DISTINCT
+  COALESCE(NULLIF(device_type, ''), '(unknown)') AS device_type,
+  COALESCE(NULLIF(os, ''), '(unknown)') AS os,
+  PERCENTILE_CONT(full_load_ms, 0.75 IGNORE NULLS) OVER (
+    PARTITION BY device_type, os
+  ) AS exact_p75_full_load_ms
+FROM page_loads
+WHERE
+  measurement_stage = 'complete'
+  AND full_load_ms IS NOT NULL
+ORDER BY exact_p75_full_load_ms DESC;
+```
+
+## 11. Сэмплирование
 
 Код измерителя не выполняет сэмплирование: все предусмотренные события всегда публикуются в `dataLayer`.
 
 Если тег GTM, отправляющий данные внешнему получателю, использует сэмплирование, решение принимается один раз для всего `page_load_id`, включая связанные события `page_bfcache_restore`. Нельзя независимо сэмплировать отдельные события, иначе последовательность `started → complete` или `started → snapshot → complete` станет неполной.
 
-## 11. Критерии приёмки
+## 12. Критерии приёмки
 
 1. Обычная загрузка создаёт только `started → complete` с одним `page_load_id`; отдельное событие `dom_ready` отсутствует.
 2. У `complete` поля `milestones.dom_ready_reached` и `milestones.load_reached` равны `true`, а доступные `dom_ready_ms` и `full_load_ms` заполнены.
@@ -816,8 +1087,13 @@ function () {
 20. При отсутствии обоих timing API события всё равно публикуются с `timing_api: "unavailable"` и `null` во всех метриках.
 21. `full_load_ms` заполнен только у стадии `complete`.
 22. `redirect_time_ms` не принимает ложное нулевое значение при недоступном cross-origin timing.
+23. Подготовительный BigQuery-скрипт оставляет не более одной строки на `page_load_id` с приоритетом `complete → snapshot → started`.
+24. Отчёты по `full_load_ms` используют только стадию `complete`, а TTFB и редиректы считаются по дедуплицированным загрузкам.
+25. P50, P75 и P95 возвращаются в миллисекундах; `NULL` не заменяется нулём.
+26. PWA vs Web исключает строки с `is_pwa: null`.
+27. Все SQL-примеры используют стандартные поля GA4 BigQuery и плоские параметры из `event_params`.
 
-## 12. Тестовые сценарии
+## 13. Тестовые сценарии
 
 | Сценарий | Ожидаемый результат |
 | --- | --- |
@@ -846,3 +1122,7 @@ function () {
 | Cross-origin redirect | TTFB включает навигацию, `redirect_time_ms` равен `null`. |
 | Повторное выполнение тега | `page_load_id` не меняется, новых push и слушателей не появляется. |
 | Timing API недоступен | Контекст и стадии присутствуют, все метрики равны `null`. |
+| BigQuery: `started → snapshot → complete` | В `page_loads` остаётся одна строка стадии `complete`. |
+| BigQuery: `started → snapshot` без complete | В `page_loads` остаётся одна строка стадии `snapshot`. |
+| BigQuery: `redirect_time_ms` отсутствует | Загрузка не участвует в медиане времени редиректа и не создаёт ложный ноль. |
+| BigQuery: `is_pwa` неизвестен | Загрузка не участвует в сравнении PWA vs Web. |
