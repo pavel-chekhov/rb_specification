@@ -402,6 +402,11 @@ function () {
 <script>
 (function (window, document) {
   'use strict';
+  
+  if ({{random_group_10}} >= 5) { // determine the sample size
+    dataLayer.push({event: 'first_page_view'}); // push the event if function execution is interrupted
+    return;
+  }
 
   var GUARD_NAME = '__PAGE_LOAD_PERFORMANCE_MONITOR_V2__';
   var MAX_LOAD_WAIT_MS = 30000;
